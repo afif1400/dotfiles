@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+# commit-msg hook: normalize commit messages to conventional commit format
+# Applies imperative mood, consistent casing, and format corrections.
+set -euo pipefail
+
+COMMIT_MSG_FILE="$1"
+MSG=$(cat "$COMMIT_MSG_FILE")
+
+# Skip merge commits and fixup/squash commits
+if [[ "$MSG" =~ ^(Merge\ |fixup!\ |squash!\ |amend!\ ) ]]; then
+  exit 0
+fi
+
+# Extract the subject line (first non-comment, non-empty line)
+SUBJECT=$(echo "$MSG" | { grep -v '^#' || true; } | { grep -v '^$' || true; } | head -1)
+BODY=$(echo "$MSG" | tail -n +2)
+
+if [[ -z "$SUBJECT" ]]; then
+  exit 0
+fi
+
+# --- Prefix normalization ---
+
+# Map non-standard prefixes to conventional commit types
+normalize_prefix() {
+  local prefix="$1"
+  prefix=$(echo "$prefix" | tr '[:upper:]' '[:lower:]')
+  case "$prefix" in
+    feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)
+      echo "$prefix" ;;
+    phase-*|wip)
+      echo "feat" ;;
+    design)
+      echo "style" ;;
+    rfc)
+      echo "docs" ;;
+    hotfix)
+      echo "fix" ;;
+    *)
+      echo "$prefix" ;;
+  esac
+}
+
+ORIGINAL_SUBJECT="$SUBJECT"
+
+SCOPE_RE='^([a-zA-Z][a-zA-Z0-9_-]*)\(([^)]+)\): (.+)'
+NOSCOPE_RE='^([a-zA-Z][a-zA-Z0-9_-]*): (.+)'
+
+if [[ "$SUBJECT" =~ $SCOPE_RE ]]; then
+  # Has scope: type(scope): description
+  RAW_PREFIX="${BASH_REMATCH[1]}"
+  SCOPE="${BASH_REMATCH[2]}"
+  DESC="${BASH_REMATCH[3]}"
+  PREFIX=$(normalize_prefix "$RAW_PREFIX")
+elif [[ "$SUBJECT" =~ $NOSCOPE_RE ]]; then
+  # No scope: type: description
+  RAW_PREFIX="${BASH_REMATCH[1]}"
+  SCOPE=""
+  DESC="${BASH_REMATCH[2]}"
+  PREFIX=$(normalize_prefix "$RAW_PREFIX")
+else
+  # No conventional prefix — leave as-is but apply other normalizations
+  PREFIX=""
+  SCOPE=""
+  DESC="$SUBJECT"
+fi
+
+# --- Description normalization ---
+
+# Remove "Entire-Checkpoint: ..." artifacts from the subject
+DESC=$(echo "$DESC" | sed 's/ *Entire-Checkpoint: [a-f0-9]*//g')
+
+# Remove trailing period from subject
+DESC=$(echo "$DESC" | sed 's/\.$//')
+
+# Fix redundant verb after prefix: "fix: fixed X" → "fix: X"
+# "fix: fixed" → "fix: "
+if [[ "$PREFIX" == "fix" ]]; then
+  DESC=$(echo "$DESC" | sed -E 's/^fixed //')
+  DESC=$(echo "$DESC" | sed -E 's/^fixing //')
+fi
+if [[ "$PREFIX" == "feat" ]]; then
+  DESC=$(echo "$DESC" | sed -E 's/^added /add /')
+  DESC=$(echo "$DESC" | sed -E 's/^adding /add /')
+  DESC=$(echo "$DESC" | sed -E 's/^implemented /implement /')
+  DESC=$(echo "$DESC" | sed -E 's/^implementing /implement /')
+fi
+if [[ "$PREFIX" == "chore" ]]; then
+  DESC=$(echo "$DESC" | sed -E 's/^added /add /')
+  DESC=$(echo "$DESC" | sed -E 's/^adding /add /')
+  DESC=$(echo "$DESC" | sed -E 's/^updated /update /')
+  DESC=$(echo "$DESC" | sed -E 's/^updating /update /')
+  DESC=$(echo "$DESC" | sed -E 's/^removed /remove /')
+  DESC=$(echo "$DESC" | sed -E 's/^removing /remove /')
+fi
+if [[ "$PREFIX" == "docs" ]]; then
+  DESC=$(echo "$DESC" | sed -E 's/^added /add /')
+  DESC=$(echo "$DESC" | sed -E 's/^updated /update /')
+  DESC=$(echo "$DESC" | sed -E 's/^removed /remove /')
+fi
+if [[ "$PREFIX" == "test" ]]; then
+  DESC=$(echo "$DESC" | sed -E 's/^added /add /')
+  DESC=$(echo "$DESC" | sed -E 's/^updated /update /')
+fi
+if [[ "$PREFIX" == "refactor" ]]; then
+  DESC=$(echo "$DESC" | sed -E 's/^refactored //')
+  DESC=$(echo "$DESC" | sed -E 's/^refactoring //')
+fi
+if [[ "$PREFIX" == "style" ]]; then
+  DESC=$(echo "$DESC" | sed -E 's/^styled //')
+  DESC=$(echo "$DESC" | sed -E 's/^fixed /fix /')
+fi
+
+# General past-tense → imperative for common verbs (only at start of description)
+DESC=$(echo "$DESC" | sed -E 's/^changed /change /')
+DESC=$(echo "$DESC" | sed -E 's/^created /create /')
+DESC=$(echo "$DESC" | sed -E 's/^deleted /delete /')
+DESC=$(echo "$DESC" | sed -E 's/^enabled /enable /')
+DESC=$(echo "$DESC" | sed -E 's/^disabled /disable /')
+DESC=$(echo "$DESC" | sed -E 's/^moved /move /')
+DESC=$(echo "$DESC" | sed -E 's/^renamed /rename /')
+DESC=$(echo "$DESC" | sed -E 's/^replaced /replace /')
+DESC=$(echo "$DESC" | sed -E 's/^improved /improve /')
+DESC=$(echo "$DESC" | sed -E 's/^converted /convert /')
+DESC=$(echo "$DESC" | sed -E 's/^migrated /migrate /')
+DESC=$(echo "$DESC" | sed -E 's/^configured /configure /')
+DESC=$(echo "$DESC" | sed -E 's/^integrated /integrate /')
+DESC=$(echo "$DESC" | sed -E 's/^introduced /introduce /')
+DESC=$(echo "$DESC" | sed -E 's/^resolved /resolve /')
+DESC=$(echo "$DESC" | sed -E 's/^corrected /correct /')
+
+# Ensure lowercase first char in description (unless it's an acronym/proper noun)
+FIRST_CHAR="${DESC:0:1}"
+SECOND_CHAR="${DESC:1:1}"
+if [[ "$FIRST_CHAR" =~ [A-Z] && ! "$SECOND_CHAR" =~ [A-Z] ]]; then
+  # Uppercase followed by lowercase — downcase it
+  DESC="$(echo "$FIRST_CHAR" | tr '[:upper:]' '[:lower:]')${DESC:1}"
+fi
+
+# --- Reassemble ---
+
+if [[ -n "$PREFIX" && -n "$SCOPE" ]]; then
+  NEW_SUBJECT="${PREFIX}(${SCOPE}): ${DESC}"
+elif [[ -n "$PREFIX" ]]; then
+  NEW_SUBJECT="${PREFIX}: ${DESC}"
+else
+  NEW_SUBJECT="$DESC"
+fi
+
+# --- Warn on long subject (>72 chars) ---
+if [[ ${#NEW_SUBJECT} -gt 72 ]]; then
+  echo "warning: commit subject is ${#NEW_SUBJECT} chars (recommended max: 72)" >&2
+fi
+
+# Write back
+if [[ "$NEW_SUBJECT" != "$ORIGINAL_SUBJECT" ]]; then
+  echo "normalized: $ORIGINAL_SUBJECT" >&2
+  echo "        →  $NEW_SUBJECT" >&2
+fi
+
+{
+  echo "$NEW_SUBJECT"
+  echo "$BODY"
+} > "$COMMIT_MSG_FILE"
